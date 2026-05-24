@@ -8,9 +8,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"bootenv/internal/btrfs"
+	"bootenv/internal/config"
 	"bootenv/internal/grubgen"
-	"bootenv/internal/snapstore"
 )
+
+// cfgPath is the path to the bootenv TOML config file, set by --config.
+var cfgPath string
 
 var rootCmd = &cobra.Command{
 	Use:   "bootenv",
@@ -27,6 +30,9 @@ func Execute() {
 }
 
 func init() {
+	rootCmd.PersistentFlags().StringVarP(&cfgPath, "config", "c", config.DefaultPath,
+		"path to bootenv TOML config file")
+
 	rootCmd.AddCommand(
 		newSnapshotCmd(),
 		newGrubCmd(),
@@ -41,7 +47,6 @@ func init() {
 func guardSnapshot() {
 	inside, err := btrfs.IsInsideSnapshot()
 	if err != nil {
-		// Can't determine; proceed with a warning.
 		fmt.Fprintln(os.Stderr, "warning: could not determine snapshot state:", err)
 		return
 	}
@@ -72,18 +77,4 @@ func regenerateGrub() error {
 		return fmt.Errorf("update-grub: %w\n%s", err, out)
 	}
 	return nil
-}
-
-// snapshotEntries converts snapstore.Entry slice to grubgen.SnapInfo slice.
-func snapstoreToGrubSnaps(entries []snapstore.Entry) []grubgen.SnapInfo {
-	out := make([]grubgen.SnapInfo, len(entries))
-	for i, e := range entries {
-		out[i] = grubgen.SnapInfo{
-			Name:      e.Name,
-			Kind:      e.Kind,
-			KernelVer: e.KernelVer,
-			RootPath:  e.RootPath,
-		}
-	}
-	return out
 }

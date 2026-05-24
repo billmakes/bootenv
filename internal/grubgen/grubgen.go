@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
+	"time"
 )
 
 const outputPath = "/etc/grub.d/42_bootenv_snapshots"
@@ -21,28 +23,42 @@ type Entry struct {
 	RootUUID  string
 }
 
+// grubTemplate wraps all snapshot entries in a single submenu, mirroring the
+// "Advanced Options" submenu style used by /etc/grub.d/10_linux.
 const grubTemplate = `#!/bin/sh
 exec tail -n +3 $0
-{{range .}}
-menuentry "{{.Distro}} Snapshot - {{.Name}} ({{.KernelVer}})" {
-    insmod part_gpt
-    insmod btrfs
 
-    search --no-floppy --fs-uuid --set=root {{.RootUUID}}
+submenu "Bootenv Snapshots" {
+{{- range .}}
+    menuentry "{{.Distro}} — {{.Kind}} snapshot {{.Name}} ({{.KernelVer}})" {
+        insmod part_gpt
+        insmod btrfs
 
-    linux /@/boot/vmlinuz-{{.KernelVer}} root=UUID={{.RootUUID}} rootflags=subvol=@snapshots/root/{{.Kind}}/{{.Name}} rw quiet
-    initrd /@/boot/initrd.img-{{.KernelVer}}
+        search --no-floppy --fs-uuid --set=root {{.RootUUID}}
+
+        linux /@/boot/vmlinuz-{{.KernelVer}} root=UUID={{.RootUUID}} rootflags=subvol=@snapshots/root/{{.Kind}}/{{.Name}} rw quiet
+        initrd /@/boot/initrd.img-{{.KernelVer}}
+    }
+{{end -}}
 }
-{{end}}`
+`
 
-// Generate writes the grub snippet for the given entries and makes it executable.
-// It skips entries where the kernel or initrd files are missing from /boot.
+// Generate writes the grub snippet to /etc/grub.d/42_bootenv_snapshots,
+// checking kernel/initrd existence under /boot. Entries are written in the
+// order provided (callers should pass them newest-first).
 func Generate(entries []Entry) error {
-	// Filter entries where kernel files actually exist on disk.
+	return GenerateTo(entries, outputPath, "/boot")
+}
+
+// GenerateTo writes the grub snippet to outputPath, checking kernel/initrd
+// existence under bootDir. This function is the real implementation; callers
+// that need to control either path (e.g. tests) call this directly.
+func GenerateTo(entries []Entry, outputPath, bootDir string) error {
+	// Filter entries where kernel and initrd files actually exist.
 	var valid []Entry
 	for _, e := range entries {
-		kernel := fmt.Sprintf("/boot/vmlinuz-%s", e.KernelVer)
-		initrd := fmt.Sprintf("/boot/initrd.img-%s", e.KernelVer)
+		kernel := filepath.Join(bootDir, fmt.Sprintf("vmlinuz-%s", e.KernelVer))
+		initrd := filepath.Join(bootDir, fmt.Sprintf("initrd.img-%s", e.KernelVer))
 		if _, err := os.Stat(kernel); err != nil {
 			fmt.Fprintf(os.Stderr, "Skipping %s: missing %s\n", e.Name, kernel)
 			continue
@@ -128,10 +144,12 @@ type SnapInfo struct {
 	Kind      string
 	KernelVer string
 	RootPath  string
+	CreatedAt time.Time // mtime of the snapshot root directory
 }
 
-// SnapInfoFromDir scans a snapshot root directory and returns entries ready
-// for BuildEntries.  dir is e.g. "/@snapshots/root".
+// SnapInfoFromDir scans a snapshot root directory and returns entries sorted
+// newest-first by directory mtime, ready for BuildEntries.
+// dir is e.g. "/@snapshots/root".
 func SnapInfoFromDir(dir string) []SnapInfo {
 	var out []SnapInfo
 	for _, kind := range []string{"auto", "manual"} {
@@ -151,9 +169,19 @@ func SnapInfoFromDir(dir string) []SnapInfo {
 				Kind:      kind,
 				KernelVer: kver,
 				RootPath:  snapPath,
+				CreatedAt: dirMtime(snapPath),
 			})
 		}
 	}
+
+	// Newest first; tie-break by name descending for determinism.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].Name > out[j].Name
+	})
+
 	return out
 }
 
@@ -178,7 +206,6 @@ func resolveKernel(rootPath string) string {
 	if len(names) == 0 {
 		return ""
 	}
-	// lexical sort is fine for kernel version strings
 	last := names[0]
 	for _, n := range names[1:] {
 		if n > last {
@@ -186,4 +213,13 @@ func resolveKernel(rootPath string) string {
 		}
 	}
 	return last
+}
+
+// dirMtime returns the modification time of a directory, or the zero time on error.
+func dirMtime(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
