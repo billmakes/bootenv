@@ -1,0 +1,32 @@
+# Build outputs
+/bootenv
+/bin/
+/dist/
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Go workspace and vendored dependencies
+go.work
+go.work.sum
+/vendor/
+
+# Local environment and secrets
+.env
+.env.*
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

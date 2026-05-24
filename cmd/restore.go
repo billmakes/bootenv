@@ -1,0 +1,107 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"bootenv/internal/btrfs"
+	"bootenv/internal/snapstore"
+)
+
+func newRestoreCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restore <name>",
+		Short: "Promote a snapshot to the live root subvolume (/@)",
+		Long: `Replaces the current /@ subvolume with the named snapshot.
+
+Steps:
+  1. Mount the btrfs top-level volume at /run/bootenv/mnt
+  2. Rename the current /@ to /@-pre-restore-<timestamp> (the safety backup)
+  3. Snapshot /@snapshots/root/<kind>/<name> → /@
+  4. Regenerate GRUB menu
+
+The renamed old root (/@-pre-restore-<timestamp>) remains at the btrfs
+top-level. To remove it later:
+  sudo mount -o subvolid=5 /dev/<device> /run/bootenv/mnt
+  sudo btrfs subvolume delete /run/bootenv/mnt/@-pre-restore-<timestamp>
+  sudo umount /run/bootenv/mnt
+
+A reboot is required for the restored environment to take effect.
+Home (/home) is left untouched.`,
+		Args:    cobra.ExactArgs(1),
+		RunE:    runRestore,
+		Example: "  bootenv restore before-upgrade",
+	}
+}
+
+func runRestore(_ *cobra.Command, args []string) error {
+	name := args[0]
+
+	entry, err := snapstore.Resolve(name)
+	if err != nil {
+		return err
+	}
+
+	// Step 1 — mount the btrfs top-level so /@ is reachable as an OS path.
+	// /@snapshots/... paths are INSIDE @ and are already reachable from the
+	// running root without this mount; we only need it for @ itself.
+	fmt.Printf("Step 1/4 — Mounting btrfs top-level at %s\n", btrfs.DefaultTopMount)
+	tv, err := btrfs.OpenTopVol("/", btrfs.DefaultTopMount)
+	if err != nil {
+		return fmt.Errorf("cannot access btrfs top-level: %w", err)
+	}
+	defer func() {
+		if err := tv.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: unmount top-level: %v\n", err)
+		}
+	}()
+
+	rootAt := tv.RootAt() // /run/bootenv/mnt/@
+
+	// Step 2 — rename the current @ out of the way.
+	// We rename rather than delete because @ likely contains nested subvolumes
+	// (like @snapshots) and btrfs refuses to delete a subvolume that has them.
+	ts := time.Now().Format("2006-01-02_150405")
+	backupName := fmt.Sprintf("@-pre-restore-%s", ts)
+	backupAt := filepath.Join(tv.Mount, backupName)
+
+	fmt.Printf("Step 2/4 — Renaming current /@ → /%s (safety backup)\n", backupName)
+	if btrfs.SubvolumeExists(rootAt) {
+		if err := os.Rename(rootAt, backupAt); err != nil {
+			return fmt.Errorf("rename /@ → /%s failed: %w", backupName, err)
+		}
+	} else {
+		fmt.Println("  (/@ already absent — resuming partial restore, skipping rename)")
+	}
+
+	// Step 3 — create the new @ from the chosen snapshot.
+	// entry.RootPath (e.g. /@snapshots/root/manual/before-upgrade) is a
+	// normal OS path: it lives inside @ which is still mounted at /.
+	fmt.Printf("Step 3/4 — Restoring: %s → /@\n", entry.RootPath)
+	if err := btrfs.Snapshot(entry.RootPath, rootAt); err != nil {
+		return fmt.Errorf("restore snapshot failed: %w\n"+
+			"  old root is preserved at: /%s\n"+
+			"  to recover manually: btrfs subvolume snapshot %s/%s %s",
+			err, backupName, tv.Mount, backupName, rootAt)
+	}
+
+	// Step 4 — regenerate GRUB.
+	fmt.Println("Step 4/4 — Regenerating GRUB")
+	if err := regenerateGrub(); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ Restored %q to /@\n", name)
+	fmt.Printf("  Old root preserved at: /%s\n", backupName)
+	fmt.Printf("  To delete it after confirming the restore works:\n")
+	fmt.Printf("    sudo mount -o subvolid=5 $(findmnt -no SOURCE / | cut -d'[' -f1) %s\n", btrfs.DefaultTopMount)
+	fmt.Printf("    sudo btrfs subvolume delete %s\n", backupAt)
+	fmt.Printf("    sudo umount %s\n", btrfs.DefaultTopMount)
+	fmt.Println("  Reboot to enter the restored environment.")
+	return nil
+}
