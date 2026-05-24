@@ -24,11 +24,92 @@ type TopVol struct {
 	Mount string // OS mountpoint, e.g. /run/bootenv/mnt
 }
 
+// Package-level seams. Each exported function below delegates to one of these
+// variables so tests can swap in fakes via WithFakes (see testing.go).
+var (
+	snapshotFn          = realSnapshot
+	deleteFn            = realDelete
+	subvolumeExistsFn   = realSubvolumeExists
+	openTopVolFn        = realOpenTopVol
+	closeTopVolFn       = realCloseTopVol
+	findmntSourceFn     = realFindmntSource
+	findmntUUIDFn       = realFindmntUUID
+	kernelVersionFn     = realKernelVersion
+	isInsideSnapshotFn  = realIsInsideSnapshot
+	currentRootSubvolFn = realCurrentRootSubvol
+)
+
 // OpenTopVol mounts subvolid=5 of the btrfs filesystem containing mountpoint
 // (typically "/") at target and returns a TopVol ready for use.
 // The caller must call Close when done.
 func OpenTopVol(mountpoint, target string) (*TopVol, error) {
-	src, err := FindmntSource(mountpoint)
+	return openTopVolFn(mountpoint, target)
+}
+
+// Close unmounts the top-level volume.
+func (tv *TopVol) Close() error {
+	return closeTopVolFn(tv)
+}
+
+// RootAt returns the OS path of the root subvolume (@) within the mounted
+// top-level, e.g. "/run/bootenv/mnt/@".
+func (tv *TopVol) RootAt() string {
+	return filepath.Join(tv.Mount, "@")
+}
+
+// Snapshot creates a btrfs snapshot of src at dst.
+func Snapshot(src, dst string) error { return snapshotFn(src, dst) }
+
+// SubvolumeExists reports whether path is a btrfs subvolume that currently exists.
+func SubvolumeExists(path string) bool { return subvolumeExistsFn(path) }
+
+// Delete removes a btrfs subvolume.
+func Delete(path string) error { return deleteFn(path) }
+
+// FindmntUUID returns the filesystem UUID of the given mountpoint.
+func FindmntUUID(mountpoint string) (string, error) { return findmntUUIDFn(mountpoint) }
+
+// FindmntSource returns the SOURCE field (device/subvol) of the given mountpoint.
+func FindmntSource(mountpoint string) (string, error) { return findmntSourceFn(mountpoint) }
+
+// KernelVersion returns the running kernel version string (e.g. "6.1.0-31-amd64").
+func KernelVersion() (string, error) { return kernelVersionFn() }
+
+// IsInsideSnapshot reports whether the current root mount is a snapshot subvolume.
+// It checks if the SOURCE of / contains "@snapshots".
+func IsInsideSnapshot() (bool, error) { return isInsideSnapshotFn() }
+
+// CurrentRootSubvol returns the btrfs subvolume path that is currently
+// mounted as "/", e.g. "/@snapshots/root/auto/2025-05-20_090132" or "/@".
+// The path is extracted from the bracketed portion of findmnt SOURCE output
+// (e.g. "/dev/nvme0n1p2[/@snapshots/root/auto/2025-05-20_090132]").
+// Returns "/@" when no bracketed path is present.
+func CurrentRootSubvol() (string, error) { return currentRootSubvolFn() }
+
+// ---- real implementations ---------------------------------------------------
+
+func realSnapshot(src, dst string) error {
+	out, err := exec.Command("btrfs", "subvolume", "snapshot", src, dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("btrfs snapshot %s → %s: %w\n%s", src, dst, err, out)
+	}
+	return nil
+}
+
+func realDelete(path string) error {
+	out, err := exec.Command("btrfs", "subvolume", "delete", path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("btrfs subvolume delete %s: %w\n%s", path, err, out)
+	}
+	return nil
+}
+
+func realSubvolumeExists(path string) bool {
+	return exec.Command("btrfs", "subvolume", "show", path).Run() == nil
+}
+
+func realOpenTopVol(mountpoint, target string) (*TopVol, error) {
+	src, err := findmntSourceFn(mountpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -46,8 +127,7 @@ func OpenTopVol(mountpoint, target string) (*TopVol, error) {
 	return &TopVol{Mount: target}, nil
 }
 
-// Close unmounts the top-level volume.
-func (tv *TopVol) Close() error {
+func realCloseTopVol(tv *TopVol) error {
 	out, err := exec.Command("umount", tv.Mount).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("umount %s: %w\n%s", tv.Mount, err, out)
@@ -55,45 +135,12 @@ func (tv *TopVol) Close() error {
 	return nil
 }
 
-// RootAt returns the OS path of the root subvolume (@) within the mounted
-// top-level, e.g. "/run/bootenv/mnt/@".
-func (tv *TopVol) RootAt() string {
-	return filepath.Join(tv.Mount, "@")
-}
-
-// Snapshot creates a btrfs snapshot of src at dst.
-func Snapshot(src, dst string) error {
-	out, err := exec.Command("btrfs", "subvolume", "snapshot", src, dst).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("btrfs snapshot %s → %s: %w\n%s", src, dst, err, out)
-	}
-	return nil
-}
-
-// SubvolumeExists reports whether path is a btrfs subvolume that currently exists.
-func SubvolumeExists(path string) bool {
-	return exec.Command("btrfs", "subvolume", "show", path).Run() == nil
-}
-
-
-
-// Delete removes a btrfs subvolume.
-func Delete(path string) error {
-	out, err := exec.Command("btrfs", "subvolume", "delete", path).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("btrfs subvolume delete %s: %w\n%s", path, err, out)
-	}
-	return nil
-}
-
-// FindmntUUID returns the filesystem UUID of the given mountpoint.
-func FindmntUUID(mountpoint string) (string, error) {
-	return findmntField("-no", "UUID", mountpoint)
-}
-
-// FindmntSource returns the SOURCE field (device/subvol) of the given mountpoint.
-func FindmntSource(mountpoint string) (string, error) {
+func realFindmntSource(mountpoint string) (string, error) {
 	return findmntField("-no", "SOURCE", mountpoint)
+}
+
+func realFindmntUUID(mountpoint string) (string, error) {
+	return findmntField("-no", "UUID", mountpoint)
 }
 
 func findmntField(opts, field, mountpoint string) (string, error) {
@@ -104,8 +151,7 @@ func findmntField(opts, field, mountpoint string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// KernelVersion returns the running kernel version string (e.g. "6.1.0-31-amd64").
-func KernelVersion() (string, error) {
+func realKernelVersion() (string, error) {
 	out, err := exec.Command("uname", "-r").Output()
 	if err != nil {
 		return "", fmt.Errorf("uname -r: %w", err)
@@ -113,23 +159,16 @@ func KernelVersion() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// IsInsideSnapshot reports whether the current root mount is a snapshot subvolume.
-// It checks if the SOURCE of / contains "@snapshots".
-func IsInsideSnapshot() (bool, error) {
-	src, err := FindmntSource("/")
+func realIsInsideSnapshot() (bool, error) {
+	src, err := findmntSourceFn("/")
 	if err != nil {
 		return false, err
 	}
 	return bytes.Contains([]byte(src), []byte("@snapshots")), nil
 }
 
-// CurrentRootSubvol returns the btrfs subvolume path that is currently
-// mounted as "/", e.g. "/@snapshots/root/auto/2025-05-20_090132" or "/@".
-// The path is extracted from the bracketed portion of findmnt SOURCE output
-// (e.g. "/dev/nvme0n1p2[/@snapshots/root/auto/2025-05-20_090132]").
-// Returns "/@" when no bracketed path is present.
-func CurrentRootSubvol() (string, error) {
-	src, err := FindmntSource("/")
+func realCurrentRootSubvol() (string, error) {
+	src, err := findmntSourceFn("/")
 	if err != nil {
 		return "", err
 	}

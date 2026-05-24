@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,20 @@ import (
 	"bootenv/internal/config"
 	"bootenv/internal/snapstore"
 )
+
+// confirmReader is the stdin source used by the restore prompt. Tests swap it.
+var confirmReader io.Reader = os.Stdin
+
+// readConfirm reads one line from r and returns true iff the user typed y/yes
+// (case-insensitive, trimmed).
+func readConfirm(r io.Reader) (bool, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && line == "" {
+		return false, err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
+}
 
 func newRestoreCmd() *cobra.Command {
 	return &cobra.Command{
@@ -92,13 +107,11 @@ func runRestore(_ *cobra.Command, args []string) error {
 	fmt.Printf("The current /@ will be renamed to /@-pre-restore-<timestamp> as a safety backup.\n\n")
 	fmt.Print("Are you sure you want to continue? [y/N] ")
 
-	reader := bufio.NewReader(os.Stdin)
-	answer, err := reader.ReadString('\n')
+	ok, err = readConfirm(confirmReader)
 	if err != nil {
 		return fmt.Errorf("reading confirmation: %w", err)
 	}
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	if answer != "y" && answer != "yes" {
+	if !ok {
 		fmt.Println("Aborted.")
 		return nil
 	}

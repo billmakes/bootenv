@@ -28,12 +28,16 @@ sudo install -m 755 bootenv /usr/local/bin/bootenv
 ## Test
 
 ```sh
-go test ./...          # all packages
-go test ./... -v       # with per-test output
+go test ./...                            # unit tests; no root or btrfs needed
+sudo go test -tags=integration ./...     # also run real-btrfs integration tests
 ```
 
-Tests cover `config`, `snapstore`, and `grubgen` using temporary directories —
-no real btrfs filesystem or root access is required.
+Unit tests cover `config`, `snapstore`, `grubgen`, and the `cmd` orchestration
+(snapshot, cleanup, delete, restore) using temporary directories and a fakeable
+seam over `internal/btrfs`. The integration suite (`-tags=integration`) creates
+a loopback btrfs image to exercise the real `btrfs subvolume` commands and the
+restore rename-then-snapshot sequence; it skips automatically when not run as
+root or when `btrfs-progs` is not installed.
 
 ---
 

@@ -59,10 +59,16 @@ func guardSnapshot() {
 	}
 }
 
+// regenerateGrubFn is the seam called by every command that needs to refresh
+// the GRUB menu. Tests swap it for a no-op to avoid invoking update-grub.
+var regenerateGrubFn = realRegenerateGrub
+
 // regenerateGrub regenerates the GRUB snippet and runs update-grub.
-// It reads the root target's SnapshotDir from the config so the path is
-// always consistent with what the config defines.
-func regenerateGrub() error {
+func regenerateGrub() error { return regenerateGrubFn() }
+
+// realRegenerateGrub reads the root target's SnapshotDir from the config so the
+// path is always consistent with what the config defines.
+func realRegenerateGrub() error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
