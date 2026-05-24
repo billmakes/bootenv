@@ -122,3 +122,21 @@ func IsInsideSnapshot() (bool, error) {
 	}
 	return bytes.Contains([]byte(src), []byte("@snapshots")), nil
 }
+
+// CurrentRootSubvol returns the btrfs subvolume path that is currently
+// mounted as "/", e.g. "/@snapshots/root/auto/2025-05-20_090132" or "/@".
+// The path is extracted from the bracketed portion of findmnt SOURCE output
+// (e.g. "/dev/nvme0n1p2[/@snapshots/root/auto/2025-05-20_090132]").
+// Returns "/@" when no bracketed path is present.
+func CurrentRootSubvol() (string, error) {
+	src, err := FindmntSource("/")
+	if err != nil {
+		return "", err
+	}
+	if idx := strings.Index(src, "["); idx >= 0 {
+		subvol := strings.TrimSuffix(src[idx+1:], "]")
+		return subvol, nil
+	}
+	// No bracket — mounted at the btrfs root or an unusual setup.
+	return "/@", nil
+}

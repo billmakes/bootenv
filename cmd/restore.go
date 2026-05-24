@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,9 +17,14 @@ import (
 
 func newRestoreCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "restore <name>",
+		Use:   "restore [name]",
 		Short: "Promote a root snapshot to the live root subvolume (/@)",
 		Long: `Replaces the current /@ subvolume with the named root snapshot.
+
+If no name is given, the currently booted snapshot is used. This is useful
+when you have booted into a snapshot via the GRUB menu and want to make it
+the permanent root. If you are already running from the real root (/@) and
+no name is given, an error is returned.
 
 Steps:
   1. Mount the btrfs top-level volume at /run/bootenv/mnt
@@ -33,14 +40,14 @@ top-level. To remove it later:
 
 A reboot is required for the restored environment to take effect.
 /home and other non-root targets are left untouched.`,
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.RangeArgs(0, 1),
 		RunE:    runRestore,
-		Example: "  bootenv restore before-upgrade",
+		Example: "  bootenv restore before-upgrade\n  bootenv restore",
 	}
 }
 
 func runRestore(_ *cobra.Command, args []string) error {
-	name := args[0]
+	logEvent(os.Args)
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -52,10 +59,50 @@ func runRestore(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("root target not found in config")
 	}
 
+	var name string
+
+	if len(args) == 1 {
+		name = args[0]
+	} else {
+		// No name given — use the currently booted snapshot.
+		inside, err := btrfs.IsInsideSnapshot()
+		if err != nil {
+			return fmt.Errorf("detecting current boot environment: %w", err)
+		}
+		if !inside {
+			return fmt.Errorf("currently booted from the real root (/@), not a snapshot\n" +
+				"  specify a snapshot name: bootenv restore <name>")
+		}
+
+		subvol, err := btrfs.CurrentRootSubvol()
+		if err != nil {
+			return fmt.Errorf("reading current root subvolume: %w", err)
+		}
+		name = filepath.Base(subvol)
+		fmt.Printf("Auto-detected currently booted snapshot: %s\n\n", name)
+	}
+
 	entry, err := snapstore.ResolveInTarget(config.SnapshotDirFor("root"), "root", rootTC.Source, name)
 	if err != nil {
 		return err
 	}
+
+	// Confirmation prompt — this is a destructive operation.
+	fmt.Printf("About to promote snapshot %q to the live root (/@).\n", name)
+	fmt.Printf("The current /@ will be renamed to /@-pre-restore-<timestamp> as a safety backup.\n\n")
+	fmt.Print("Are you sure you want to continue? [y/N] ")
+
+	reader := bufio.NewReader(os.Stdin)
+	answer, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("reading confirmation: %w", err)
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer != "y" && answer != "yes" {
+		fmt.Println("Aborted.")
+		return nil
+	}
+	fmt.Println()
 
 	// Step 1 — mount the btrfs top-level so /@ is reachable as an OS path.
 	fmt.Printf("Step 1/4 — Mounting btrfs top-level at %s\n", btrfs.DefaultTopMount)

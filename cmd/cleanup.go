@@ -47,6 +47,7 @@ Manual snapshots are never pruned automatically.`,
 }
 
 func runCleanup(keepOverride int, dryRun bool, targetFlag string) error {
+	logEvent(os.Args)
 	guardSnapshot()
 
 	cfg, err := config.Load(cfgPath)

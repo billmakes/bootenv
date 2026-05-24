@@ -43,6 +43,7 @@ the root target is snapshotted.`,
 }
 
 func runSnapshot(args []string, targetFlag string) error {
+	logEvent(os.Args)
 	guardSnapshot()
 
 	cfg, err := config.Load(cfgPath)
