@@ -9,14 +9,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"bootenv/internal/btrfs"
+	"bootenv/internal/config"
 	"bootenv/internal/snapstore"
 )
 
 func newRestoreCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "restore <name>",
-		Short: "Promote a snapshot to the live root subvolume (/@)",
-		Long: `Replaces the current /@ subvolume with the named snapshot.
+		Short: "Promote a root snapshot to the live root subvolume (/@)",
+		Long: `Replaces the current /@ subvolume with the named root snapshot.
 
 Steps:
   1. Mount the btrfs top-level volume at /run/bootenv/mnt
@@ -31,7 +32,7 @@ top-level. To remove it later:
   sudo umount /run/bootenv/mnt
 
 A reboot is required for the restored environment to take effect.
-Home (/home) is left untouched.`,
+/home and other non-root targets are left untouched.`,
 		Args:    cobra.ExactArgs(1),
 		RunE:    runRestore,
 		Example: "  bootenv restore before-upgrade",
@@ -41,14 +42,22 @@ Home (/home) is left untouched.`,
 func runRestore(_ *cobra.Command, args []string) error {
 	name := args[0]
 
-	entry, err := snapstore.Resolve(name)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	rootTC, ok := cfg.Targets["root"]
+	if !ok {
+		return fmt.Errorf("root target not found in config")
+	}
+
+	entry, err := snapstore.ResolveInTarget(config.SnapshotDirFor("root"), "root", rootTC.Source, name)
 	if err != nil {
 		return err
 	}
 
 	// Step 1 — mount the btrfs top-level so /@ is reachable as an OS path.
-	// /@snapshots/... paths are INSIDE @ and are already reachable from the
-	// running root without this mount; we only need it for @ itself.
 	fmt.Printf("Step 1/4 — Mounting btrfs top-level at %s\n", btrfs.DefaultTopMount)
 	tv, err := btrfs.OpenTopVol("/", btrfs.DefaultTopMount)
 	if err != nil {
@@ -63,7 +72,7 @@ func runRestore(_ *cobra.Command, args []string) error {
 	rootAt := tv.RootAt() // /run/bootenv/mnt/@
 
 	// Step 2 — rename the current @ out of the way.
-	// We rename rather than delete because @ likely contains nested subvolumes
+	// We rename rather than delete because @ may contain nested subvolumes
 	// (like @snapshots) and btrfs refuses to delete a subvolume that has them.
 	ts := time.Now().Format("2006-01-02_150405")
 	backupName := fmt.Sprintf("@-pre-restore-%s", ts)
@@ -79,10 +88,10 @@ func runRestore(_ *cobra.Command, args []string) error {
 	}
 
 	// Step 3 — create the new @ from the chosen snapshot.
-	// entry.RootPath (e.g. /@snapshots/root/manual/before-upgrade) is a
-	// normal OS path: it lives inside @ which is still mounted at /.
-	fmt.Printf("Step 3/4 — Restoring: %s → /@\n", entry.RootPath)
-	if err := btrfs.Snapshot(entry.RootPath, rootAt); err != nil {
+	// entry.Path (e.g. /@snapshots/root/manual/before-upgrade) is a normal OS
+	// path inside the currently-mounted root subvolume.
+	fmt.Printf("Step 3/4 — Restoring: %s → /@\n", entry.Path)
+	if err := btrfs.Snapshot(entry.Path, rootAt); err != nil {
 		return fmt.Errorf("restore snapshot failed: %w\n"+
 			"  old root is preserved at: /%s\n"+
 			"  to recover manually: btrfs subvolume snapshot %s/%s %s",

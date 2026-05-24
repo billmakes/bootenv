@@ -1,0 +1,28 @@
+# bootenv example configuration
+# Copy to /etc/bootenv/bootenv.toml and adjust as needed.
+#
+# Each block is one snapshot target.
+# The block name determines both the --target value on the CLI
+# and the snapshot directory (/@snapshots/<name>).
+#
+# Fields:
+#   source    = "/<name>"   subvolume to snapshot (default "/" for root, "/<name>" for others)
+#   keep_auto = 10          how many auto snapshots to keep (default 10; 0 = keep none)
+
+[root]
+# Snapshots /  →  /@snapshots/root
+# Special: feeds the GRUB boot menu.
+keep_auto = 10
+
+[home]
+# Snapshots /home  →  /@snapshots/home
+keep_auto = 5
+
+# Add more targets as needed — snapshot directories are created automatically.
+# [var]
+# keep_auto = 3
+
+# Override source if your subvolume path differs from the block name:
+# [data]
+# source    = "/mnt/data"
+# keep_auto = 2

@@ -8,71 +8,136 @@ import (
 	"bootenv/internal/config"
 )
 
-func TestLoad_Defaults(t *testing.T) {
-	// Point at a path that definitely does not exist.
+func TestLoad_MissingFile_ReturnsDefaultConfig(t *testing.T) {
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
 	if err != nil {
 		t.Fatalf("unexpected error for missing file: %v", err)
 	}
-	if cfg.Root.KeepAuto != config.Defaults.Root.KeepAuto {
-		t.Errorf("Root.KeepAuto = %d, want %d", cfg.Root.KeepAuto, config.Defaults.Root.KeepAuto)
+
+	root, ok := cfg.Targets["root"]
+	if !ok {
+		t.Fatal("root target missing from default config")
 	}
-	if cfg.Home.KeepAuto != config.Defaults.Home.KeepAuto {
-		t.Errorf("Home.KeepAuto = %d, want %d", cfg.Home.KeepAuto, config.Defaults.Home.KeepAuto)
+	if root.Source != "/" {
+		t.Errorf("root.Source = %q, want /", root.Source)
+	}
+	if root.GetKeepAuto() != config.DefaultKeepAuto {
+		t.Errorf("root.GetKeepAuto() = %d, want %d", root.GetKeepAuto(), config.DefaultKeepAuto)
+	}
+	if got := config.SnapshotDirFor("root"); got != "/@snapshots/root" {
+		t.Errorf("SnapshotDirFor(root) = %q, want /@snapshots/root", got)
 	}
 }
 
-func TestLoad_ParsesFile(t *testing.T) {
-	toml := `
+func TestLoad_OnlyRootTarget(t *testing.T) {
+	path := writeTOML(t, `
 [root]
 keep_auto = 7
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	root := cfg.Targets["root"]
+	if root.GetKeepAuto() != 7 {
+		t.Errorf("root.GetKeepAuto() = %d, want 7", root.GetKeepAuto())
+	}
+	if root.Source != "/" {
+		t.Errorf("root.Source = %q, want /", root.Source)
+	}
+}
+
+func TestLoad_MultipleTargets(t *testing.T) {
+	path := writeTOML(t, `
+[root]
+keep_auto = 10
 
 [home]
 keep_auto = 3
-`
-	path := writeTempTOML(t, toml)
+
+[var]
+source    = "/var"
+keep_auto = 2
+`)
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Root.KeepAuto != 7 {
-		t.Errorf("Root.KeepAuto = %d, want 7", cfg.Root.KeepAuto)
+
+	if _, ok := cfg.Targets["root"]; !ok {
+		t.Error("root target missing")
 	}
-	if cfg.Home.KeepAuto != 3 {
-		t.Errorf("Home.KeepAuto = %d, want 3", cfg.Home.KeepAuto)
+
+	home, ok := cfg.Targets["home"]
+	if !ok {
+		t.Fatal("home target missing")
+	}
+	if home.GetKeepAuto() != 3 {
+		t.Errorf("home.GetKeepAuto() = %d, want 3", home.GetKeepAuto())
+	}
+	if home.Source != "/home" {
+		t.Errorf("home.Source = %q, want /home", home.Source)
+	}
+	if got := config.SnapshotDirFor("home"); got != "/@snapshots/home" {
+		t.Errorf("SnapshotDirFor(home) = %q, want /@snapshots/home", got)
+	}
+
+	v := cfg.Targets["var"]
+	if v.Source != "/var" {
+		t.Errorf("var.Source = %q, want /var", v.Source)
+	}
+	if v.GetKeepAuto() != 2 {
+		t.Errorf("var.GetKeepAuto() = %d, want 2", v.GetKeepAuto())
 	}
 }
 
-func TestLoad_PartialFile_KeepsDefaults(t *testing.T) {
-	// Only [root] is specified; [home] should retain built-in default.
-	toml := `
-[root]
-keep_auto = 20
-`
-	path := writeTempTOML(t, toml)
+func TestLoad_RootInjectedWhenAbsent(t *testing.T) {
+	// A config file that only defines [home] must still get [root] injected.
+	path := writeTOML(t, `
+[home]
+keep_auto = 5
+`)
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Root.KeepAuto != 20 {
-		t.Errorf("Root.KeepAuto = %d, want 20", cfg.Root.KeepAuto)
+	if _, ok := cfg.Targets["root"]; !ok {
+		t.Error("root target should be injected even when not in the file")
 	}
-	if cfg.Home.KeepAuto != config.Defaults.Home.KeepAuto {
-		t.Errorf("Home.KeepAuto = %d, want default %d",
-			cfg.Home.KeepAuto, config.Defaults.Home.KeepAuto)
+}
+
+func TestLoad_KeepAutoZeroIsRespected(t *testing.T) {
+	// keep_auto = 0 means "keep nothing" and must not be treated as "unset".
+	path := writeTOML(t, `
+[root]
+keep_auto = 0
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Targets["root"].GetKeepAuto() != 0 {
+		t.Errorf("expected GetKeepAuto()=0, got %d", cfg.Targets["root"].GetKeepAuto())
 	}
 }
 
 func TestLoad_InvalidTOML(t *testing.T) {
-	path := writeTempTOML(t, "this is not [ valid toml !!!!")
+	path := writeTOML(t, "this is not [ valid ] toml !!!!")
 	_, err := config.Load(path)
 	if err == nil {
 		t.Fatal("expected error for invalid TOML, got nil")
 	}
 }
 
-// writeTempTOML writes content to a temp file and returns its path.
-func writeTempTOML(t *testing.T, content string) string {
+func TestGetKeepAuto_NilUsesDefault(t *testing.T) {
+	tc := config.TargetConfig{} // KeepAuto is nil
+	if got := tc.GetKeepAuto(); got != config.DefaultKeepAuto {
+		t.Errorf("GetKeepAuto() = %d, want %d", got, config.DefaultKeepAuto)
+	}
+}
+
+// writeTOML writes content to a temp file and returns its path.
+func writeTOML(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "bootenv.toml")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {

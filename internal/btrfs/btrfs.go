@@ -75,6 +75,8 @@ func SubvolumeExists(path string) bool {
 	return exec.Command("btrfs", "subvolume", "show", path).Run() == nil
 }
 
+
+
 // Delete removes a btrfs subvolume.
 func Delete(path string) error {
 	out, err := exec.Command("btrfs", "subvolume", "delete", path).CombinedOutput()

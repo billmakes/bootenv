@@ -7,101 +7,108 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"bootenv/internal/config"
 )
 
-const (
-	snapshotRootBase = "/@snapshots/root"
-	snapshotHomeBase = "/@snapshots/home"
-)
-
-// Entry represents one snapshot (root and/or home component).
+// Entry represents one snapshot subvolume for a single configured target.
 type Entry struct {
-	Name      string    // basename, e.g. "2025-05-20_090132" or "before-upgrade"
+	Target    string    // config target name, e.g. "root", "home"
+	Name      string    // snapshot basename, e.g. "2025-05-20_090132" or "before-upgrade"
 	Kind      string    // "auto" or "manual"
-	RootPath  string    // /@snapshots/root/<kind>/<name>
-	HomePath  string    // /@snapshots/home/<kind>/<name>
-	HasRoot   bool      // root subvolume directory exists
-	HasHome   bool      // home subvolume directory exists
-	KernelVer string    // from .bootenv-kernel or lib/modules (root only)
-	CreatedAt time.Time // directory mtime; root preferred, falls back to home
+	Path      string    // full path: <SnapshotDir>/<kind>/<name>
+	Source    string    // source subvol from config (e.g. "/", "/home")
+	KernelVer string    // from .bootenv-kernel marker (root target only)
+	CreatedAt time.Time // mtime of the snapshot directory
 }
 
-// List returns all known snapshots (both kinds, both targets) newest-first.
-func List() ([]Entry, error) {
-	return ListFromDirs(snapshotRootBase, snapshotHomeBase, "")
-}
-
-// ListFiltered returns snapshots filtered to one kind.
-// Pass "auto" or "manual"; empty string returns all kinds.
-func ListFiltered(kind string) ([]Entry, error) {
-	return ListFromDirs(snapshotRootBase, snapshotHomeBase, kind)
-}
-
-// ListFromDirs is the real implementation. rootBase and homeBase are the
-// directories containing "auto" and "manual" subdirectories (e.g.
-// "/@snapshots/root" and "/@snapshots/home"). kind may be "auto", "manual",
-// or "" for both. Tests pass t.TempDir()-based paths here.
-func ListFromDirs(rootBase, homeBase, kind string) ([]Entry, error) {
-	var kinds []string
-	switch kind {
-	case "auto", "manual":
-		kinds = []string{kind}
-	case "":
-		kinds = []string{"auto", "manual"}
-	default:
-		return nil, fmt.Errorf("unknown kind %q — use auto, manual, or empty string", kind)
+// ListFromDir scans snapshotDir for snapshots and returns them newest-first.
+//
+// snapshotDir is the base directory for one target (e.g. "/@snapshots/root").
+// It must contain "auto" and/or "manual" subdirectories.
+// kind may be "auto", "manual", or "" for both.
+// targetName and sourceSubvol populate the corresponding Entry fields.
+//
+// This function is the primary implementation; tests call it directly with
+// temporary directories instead of the live /@snapshots paths.
+func ListFromDir(snapshotDir, targetName, sourceSubvol, kind string) ([]Entry, error) {
+	kinds, err := resolveKinds(kind)
+	if err != nil {
+		return nil, err
 	}
 
 	var entries []Entry
 	for _, k := range kinds {
-		rootDir := filepath.Join(rootBase, k)
-		homeDir := filepath.Join(homeBase, k)
-
-		for _, name := range unionDirNames(rootDir, homeDir) {
-			rootPath := filepath.Join(rootDir, name)
-			homePath := filepath.Join(homeDir, name)
-			hasRoot := dirExists(rootPath)
-			hasHome := dirExists(homePath)
-
-			createdAt := dirMtime(rootPath)
-			if createdAt.IsZero() {
-				createdAt = dirMtime(homePath)
+		dir := filepath.Join(snapshotDir, k)
+		fis, err := os.ReadDir(dir)
+		if err != nil {
+			continue // directory not yet created — skip silently
+		}
+		for _, fi := range fis {
+			if !fi.IsDir() {
+				continue
 			}
-
+			path := filepath.Join(dir, fi.Name())
 			kver := ""
-			if hasRoot {
-				kver = resolveKernel(rootPath)
+			if targetName == "root" {
+				kver = resolveKernel(path)
 			}
-
 			entries = append(entries, Entry{
-				Name:      name,
+				Target:    targetName,
+				Name:      fi.Name(),
 				Kind:      k,
-				RootPath:  rootPath,
-				HomePath:  homePath,
-				HasRoot:   hasRoot,
-				HasHome:   hasHome,
+				Path:      path,
+				Source:    sourceSubvol,
 				KernelVer: kver,
-				CreatedAt: createdAt,
+				CreatedAt: snapCreatedAt(path),
 			})
 		}
 	}
 
-	// Newest first; tie-break by name descending for determinism.
-	sort.Slice(entries, func(i, j int) bool {
-		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
-			return entries[i].CreatedAt.After(entries[j].CreatedAt)
-		}
-		return entries[i].Name > entries[j].Name
-	})
-
+	sortNewestFirst(entries)
 	return entries, nil
 }
 
-// Resolve finds a snapshot by name across both kinds and both targets.
-// Returns an error if not found.
-func Resolve(name string) (*Entry, error) {
-	entries, err := List()
+// ListTargets returns snapshots across all given targets, sorted newest-first
+// globally by CreatedAt. kind may be "auto", "manual", or "" for both.
+func ListTargets(targets map[string]config.TargetConfig, kind string) ([]Entry, error) {
+	var all []Entry
+	for name, tc := range targets {
+		entries, err := ListFromDir(config.SnapshotDirFor(name), name, tc.Source, kind)
+		if err != nil {
+			return nil, fmt.Errorf("listing target %q: %w", name, err)
+		}
+		all = append(all, entries...)
+	}
+	sortNewestFirst(all)
+	return all, nil
+}
+
+// ResolveAll finds every snapshot named name across the given targets.
+// Returns an error if the name is not found in any target.
+func ResolveAll(targets map[string]config.TargetConfig, name string) ([]Entry, error) {
+	all, err := ListTargets(targets, "")
+	if err != nil {
+		return nil, err
+	}
+	var found []Entry
+	for _, e := range all {
+		if e.Name == name {
+			found = append(found, e)
+		}
+	}
+	if len(found) == 0 {
+		return nil, fmt.Errorf("snapshot %q not found in any configured target", name)
+	}
+	return found, nil
+}
+
+// ResolveInTarget finds a snapshot by name within a specific target's snapshot
+// directory. Used by restore, which always operates on the root target.
+func ResolveInTarget(snapshotDir, targetName, sourceSubvol, name string) (*Entry, error) {
+	entries, err := ListFromDir(snapshotDir, targetName, sourceSubvol, "")
 	if err != nil {
 		return nil, err
 	}
@@ -110,42 +117,12 @@ func Resolve(name string) (*Entry, error) {
 			return &entries[i], nil
 		}
 	}
-	return nil, fmt.Errorf("snapshot %q not found", name)
+	return nil, fmt.Errorf("snapshot %q not found in target %q", name, targetName)
 }
 
-// FilterTarget filters entries by which component(s) are present.
-//   - "root"  → only entries where HasRoot is true
-//   - "home"  → only entries where HasHome is true
-//   - "both"  → only entries where both HasRoot and HasHome are true
-//   - ""      → all entries unchanged
-func FilterTarget(entries []Entry, target string) []Entry {
-	if target == "" {
-		return entries
-	}
-	var out []Entry
-	for _, e := range entries {
-		switch target {
-		case "root":
-			if e.HasRoot {
-				out = append(out, e)
-			}
-		case "home":
-			if e.HasHome {
-				out = append(out, e)
-			}
-		case "both":
-			if e.HasRoot && e.HasHome {
-				out = append(out, e)
-			}
-		}
-	}
-	return out
-}
-
-// SelectForPrune returns the entries that should be deleted to bring the pool
-// down to keep entries. entries must be sorted newest-first (as returned by
-// ListFiltered/ListFromDirs); the tail (oldest) is returned.
-// Returns nil if len(entries) <= keep.
+// SelectForPrune returns the tail of entries that should be deleted to reduce
+// the pool to keep entries. entries must be sorted newest-first (as returned
+// by ListFromDir / ListTargets). Returns nil if len(entries) <= keep.
 func SelectForPrune(entries []Entry, keep int) []Entry {
 	if keep < 0 {
 		keep = 0
@@ -156,50 +133,60 @@ func SelectForPrune(entries []Entry, keep int) []Entry {
 	return entries[keep:]
 }
 
-// unionDirNames returns the sorted, deduplicated set of sub-directory names
-// found in dir1 and dir2. Missing directories are silently ignored.
-func unionDirNames(dir1, dir2 string) []string {
-	seen := map[string]struct{}{}
-	for _, dir := range []string{dir1, dir2} {
-		fis, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, fi := range fis {
-			if fi.IsDir() {
-				seen[fi.Name()] = struct{}{}
-			}
-		}
+// resolveKinds expands a kind filter string into the slice of kinds to scan.
+func resolveKinds(kind string) ([]string, error) {
+	switch kind {
+	case "auto", "manual":
+		return []string{kind}, nil
+	case "":
+		return []string{"auto", "manual"}, nil
+	default:
+		return nil, fmt.Errorf("unknown kind %q — use auto, manual, or empty string", kind)
 	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
-// dirExists reports whether path exists and is a directory.
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+// sortNewestFirst sorts entries newest-first by CreatedAt; name descending as
+// a deterministic tie-break.
+func sortNewestFirst(entries []Entry) {
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
+			return entries[i].CreatedAt.After(entries[j].CreatedAt)
+		}
+		return entries[i].Name > entries[j].Name
+	})
 }
 
-// dirMtime returns the modification time of path, or the zero time on error.
-func dirMtime(path string) time.Time {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
+// snapCreatedAt returns the creation time for a snapshot at path.
+//
+// Priority:
+//  1. .bootenv-created marker written by "bootenv snapshot" — exact wall-clock
+//     time recorded at the moment the snapshot was taken.
+//  2. Inode ctime via syscall — set by the kernel when the subvolume inode is
+//     first created; a reliable fallback for older snapshots that pre-date the
+//     marker file.
+func snapCreatedAt(path string) time.Time {
+	// 1. Prefer the marker file written by "bootenv snapshot".
+	markerPath := filepath.Join(path, ".bootenv-created")
+	if data, err := os.ReadFile(markerPath); err == nil {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data))); err == nil {
+			return t.Local()
+		}
 	}
-	return info.ModTime()
+
+	// 2. Fall back to inode ctime (reliable for btrfs snapshot subvolumes).
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err == nil {
+		return time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
+	}
+
+	return time.Time{}
 }
 
 // resolveKernel returns the kernel version for a root snapshot path.
 func resolveKernel(rootPath string) string {
 	marker := filepath.Join(rootPath, ".bootenv-kernel")
 	if data, err := os.ReadFile(marker); err == nil {
-		kver := strings.TrimSpace(string(data))
-		if kver != "" {
+		if kver := strings.TrimSpace(string(data)); kver != "" {
 			return kver
 		}
 	}

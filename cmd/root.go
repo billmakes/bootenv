@@ -12,14 +12,17 @@ import (
 	"bootenv/internal/grubgen"
 )
 
-// cfgPath is the path to the bootenv TOML config file, set by --config.
+// cfgPath is set by the persistent --config flag and read by all subcommands.
 var cfgPath string
 
 var rootCmd = &cobra.Command{
 	Use:   "bootenv",
 	Short: "Manage btrfs boot environment snapshots",
 	Long: `bootenv creates, lists, and manages btrfs subvolume snapshots
-and keeps the GRUB menu in sync with them.`,
+and keeps the GRUB menu in sync with them.
+
+Targets are defined in the config file. The "root" target is always present.
+Additional targets (e.g. [home]) can be added to the config.`,
 }
 
 // Execute is the entry point called from main.
@@ -56,15 +59,26 @@ func guardSnapshot() {
 	}
 }
 
-// regenerateGrub regenerates the grub snippet and runs update-grub.
+// regenerateGrub regenerates the GRUB snippet and runs update-grub.
+// It reads the root target's SnapshotDir from the config so the path is
+// always consistent with what the config defines.
 func regenerateGrub() error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	if _, ok := cfg.Targets["root"]; !ok {
+		return fmt.Errorf("root target not found in config")
+	}
+
 	rootUUID, err := btrfs.FindmntUUID("/")
 	if err != nil {
 		return fmt.Errorf("get root UUID: %w", err)
 	}
 
 	distro := grubgen.ReadDistro()
-	snaps := grubgen.SnapInfoFromDir("/@snapshots/root")
+	snaps := grubgen.SnapInfoFromDir(config.SnapshotDirFor("root"))
 	entries := grubgen.BuildEntries(snaps, distro, rootUUID)
 
 	if err := grubgen.Generate(entries); err != nil {
