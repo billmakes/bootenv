@@ -74,7 +74,7 @@ func runList(kind, targetFlag string) error {
 		}
 		created := "-"
 		if !e.CreatedAt.IsZero() {
-			created = e.CreatedAt.Format("2006-01-02 15:04:05")
+			created = e.CreatedAt.Format("1/2/06 3:04PM")
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			e.Target, e.Kind, e.Name, created, kver, e.Path)

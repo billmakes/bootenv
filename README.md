@@ -158,11 +158,11 @@ Each row is one snapshot subvolume. The **TARGET** column shows which config
 block it belongs to.
 
 ```
-TARGET  TYPE    NAME                 CREATED               KERNEL          PATH
-------  ----    ----                 -------               ------          ----
-root    auto    2025-05-20_090132    2025-05-20 09:01:32   6.1.0-31-amd64  /@snapshots/root/auto/2025-05-20_090132
-home    auto    2025-05-20_090132    2025-05-20 09:01:32   -               /@snapshots/home/auto/2025-05-20_090132
-root    manual  before-upgrade       2025-05-18 14:22:05   6.1.0-30-amd64  /@snapshots/root/manual/before-upgrade
+TARGET  TYPE    NAME                 CREATED         KERNEL          PATH
+------  ----    ----                 -------         ------          ----
+root    auto    2025-05-20_090132    5/20/25 9:01AM  6.1.0-31-amd64  /@snapshots/root/auto/2025-05-20_090132
+home    auto    2025-05-20_090132    5/20/25 9:01AM  -               /@snapshots/home/auto/2025-05-20_090132
+root    manual  before-upgrade       5/18/25 2:22PM  6.1.0-30-amd64  /@snapshots/root/manual/before-upgrade
 ```
 
 **`--type` / `-t`** — filter by kind:

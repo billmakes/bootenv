@@ -91,10 +91,34 @@ func realRegenerateGrub() error {
 		return err
 	}
 
-	fmt.Println("Running update-grub...")
-	out, err := exec.Command("update-grub").CombinedOutput()
+	grubBin, err := findUpdateGrub()
+	if err != nil {
+		return fmt.Errorf("locating update-grub: %w", err)
+	}
+	fmt.Printf("Running %s...\n", grubBin)
+	out, err := exec.Command(grubBin).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("update-grub: %w\n%s", err, out)
 	}
 	return nil
+}
+
+// updateGrubSearchPaths lists absolute locations checked before falling back
+// to $PATH. Needed because cron strips $PATH down to /usr/bin:/bin, which
+// excludes /usr/sbin where update-grub actually lives on Debian-likes.
+var updateGrubSearchPaths = []string{
+	"/usr/local/sbin/update-grub",
+	"/usr/sbin/update-grub",
+	"/sbin/update-grub",
+}
+
+// findUpdateGrub returns an absolute path to update-grub, preferring the
+// standard sbin locations over $PATH.
+func findUpdateGrub() (string, error) {
+	for _, p := range updateGrubSearchPaths {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p, nil
+		}
+	}
+	return exec.LookPath("update-grub")
 }

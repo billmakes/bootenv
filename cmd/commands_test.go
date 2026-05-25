@@ -239,3 +239,88 @@ func TestDelete_NameNotFound(t *testing.T) {
 		t.Fatal("expected error for missing name, got nil")
 	}
 }
+
+// ----------------------------- findUpdateGrub --------------------------------
+
+// withSearchPaths installs ps as the active updateGrubSearchPaths for the test.
+func withSearchPaths(t *testing.T, ps []string) {
+	t.Helper()
+	prev := updateGrubSearchPaths
+	updateGrubSearchPaths = ps
+	t.Cleanup(func() { updateGrubSearchPaths = prev })
+}
+
+func TestFindUpdateGrub_PrefersStandardSbinOverPath(t *testing.T) {
+	dir := t.TempDir()
+	standard := filepath.Join(dir, "standard-update-grub")
+	if err := os.WriteFile(standard, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake standard binary: %v", err)
+	}
+	pathDir := t.TempDir()
+	pathBin := filepath.Join(pathDir, "update-grub")
+	if err := os.WriteFile(pathBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake PATH binary: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+	withSearchPaths(t, []string{standard})
+
+	got, err := findUpdateGrub()
+	if err != nil {
+		t.Fatalf("findUpdateGrub: %v", err)
+	}
+	if got != standard {
+		t.Errorf("got %q, want %q (sbin path must win over PATH)", got, standard)
+	}
+}
+
+func TestFindUpdateGrub_FallsBackToPath(t *testing.T) {
+	pathDir := t.TempDir()
+	pathBin := filepath.Join(pathDir, "update-grub")
+	if err := os.WriteFile(pathBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake PATH binary: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+	withSearchPaths(t, []string{"/nonexistent-bootenv-test/update-grub"})
+
+	got, err := findUpdateGrub()
+	if err != nil {
+		t.Fatalf("findUpdateGrub: %v", err)
+	}
+	if got != pathBin {
+		t.Errorf("got %q, want %q (PATH fallback)", got, pathBin)
+	}
+}
+
+func TestFindUpdateGrub_NotFoundAnywhere(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty dir
+	withSearchPaths(t, []string{"/nonexistent-bootenv-test/update-grub"})
+
+	if _, err := findUpdateGrub(); err == nil {
+		t.Fatal("expected error when update-grub is nowhere, got nil")
+	}
+}
+
+// TestFindUpdateGrub_SkipsDirectoryNamedUpdateGrub guards against the case
+// where some path coincidentally contains a directory named "update-grub".
+func TestFindUpdateGrub_SkipsDirectoryNamedUpdateGrub(t *testing.T) {
+	dir := t.TempDir()
+	bogus := filepath.Join(dir, "bogus-update-grub")
+	if err := os.Mkdir(bogus, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pathDir := t.TempDir()
+	pathBin := filepath.Join(pathDir, "update-grub")
+	if err := os.WriteFile(pathBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+	withSearchPaths(t, []string{bogus})
+
+	got, err := findUpdateGrub()
+	if err != nil {
+		t.Fatalf("findUpdateGrub: %v", err)
+	}
+	if got != pathBin {
+		t.Errorf("got %q, want %q (directory should not match)", got, pathBin)
+	}
+}
